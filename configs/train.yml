@@ -1,0 +1,65 @@
+SEED:
+  - 59
+CUDA_VISIBLE_DEVICES:
+  - 0
+  - 1
+  - 2
+  - 3
+EPOCHS:
+  - 60
+MAX_STEPS:
+  - 30000
+BATCH_SIZE:
+  - 64
+LR:
+  - 3e-5
+MIN_LR:
+  - 1e-5
+DATA_PATH:
+  - '<path to data>'
+MODEL_TYPE: 
+  - "M2M100"
+MODEL_CHECKPOINT:
+  - "facebook/m2m100_418M"
+DATA_PARALLEL:
+  - true
+LOG_PRED_EVERY:
+  - 1000
+RUN_NAME:
+- "TGL_FL_150k"
+VAL_EVERY_EPOCH:
+- 15
+SAVE_EVERY:
+- 3
+SAVE_STRATEGY:
+- 'epoch'
+COMPUTE_METRICS_EVERY:
+- 3
+TARGET_LANG:
+- "en"
+NO_REPEAT_NGRAM:
+- 0
+SAMPLING:
+- false
+TEMPERATURE:
+- 1
+TOP_K:
+- 250
+NUM_BEAMS:
+- 4
+MAX_SEQ_LEN:
+- 256
+FL:
+- true
+ADAPTIVE_BATCH_SIZE:
+- false
+TOTAL_BATCH_SIZE:
+- 512
+MIN_BATCH_SIZE:
+- 32
+MAX_BATCH_SIZE:
+- 128
+FL_LR:
+- 0.1
+FL_NITERS:
+- 5
