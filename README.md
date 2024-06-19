@@ -1,6 +1,6 @@
 # Low-Resource Machine Translation through the Lens of Personalized Federated Learning
 
-This repository contains code for paper "Low-Resource Machine Translation through the Lens of Personalized Federated Learning"
+This repository contains code for paper [Low-Resource Machine Translation through the Lens of Personalized Federated Learning](https://arxiv.org/abs/2406.12564)
 
 ## Using optimizer
 
