@@ -68,13 +68,18 @@ optimizer.zero_grad()
 
 ### Getting started
 
-install requierements and set up environmental variables
+install requierements and set up environmental variables. Since the code heavily relies on the CUDA, Apex and Accelerate, it is highly recommended, to run it with [Docker Container](https://hub.docker.com/layers/vityavitalich/mtfl/apex/images/sha256-7d28a74d840ab4c3cd0f17a7bad5dc82ab70e4b6bfd496bd79e6c01b24677e45?context=repo), that already contains all dependencies.
+
+Otherwise, one may install packages with following commands, however may experience errors due to CUDA installation errors.
 
 python version = 3.10.12
 1. ```pip install -r requirements.txt```
-2. ```export HF_TOKEN=<your token>```
-3. ```export SAVING_DIR=<path to your cache directory>```
-4. ```export WANDB_API_KEY=<wandb api key for logging>```
+
+Further, to run any training, code requires to have the following environment variables to be defined
+
+1. ```export HF_TOKEN=<your token>```
+2. ```export SAVING_DIR=<path to your cache directory>```
+3. ```export WANDB_API_KEY=<wandb api key for logging>```
 
 ### Training Models
 
