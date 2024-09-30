@@ -1,42 +1,41 @@
 SEED:
   - 59
-CUDA_VISIBLE_DEVICES:
-  - 0
-  - 1
-  - 2
-  - 3
 EPOCHS:
-  - 60
-MAX_STEPS:
-  - 30000
+  - 1000
+MAX_STEPS: # overwrites epochs. set to -1 if use epochs. Calculates the number of iteration -> depends on batch size
+  - 5
 BATCH_SIZE:
-  - 64
+  - 4
 LR:
   - 3e-5
 MIN_LR:
   - 1e-5
 DATA_PATH:
-  - '<path to data>'
+  - 'lilaspourpre/mt_dataset_train_all_test_sme'
+USING_PEFT: # NOT USED
+  - True
 MODEL_TYPE: 
   - "M2M100"
 MODEL_CHECKPOINT:
   - "facebook/m2m100_418M"
 DATA_PARALLEL:
-  - true
+  - false
 LOG_PRED_EVERY:
   - 1000
 RUN_NAME:
-- "TGL_FL_150k"
+- "test"
 VAL_EVERY_EPOCH:
-- 15
+- 1
 SAVE_EVERY:
-- 3
+- 1
 SAVE_STRATEGY:
 - 'epoch'
 COMPUTE_METRICS_EVERY:
-- 3
+- 1
+QLORA: # NOT USED
+- true
 TARGET_LANG:
-- "en"
+- "fi"
 NO_REPEAT_NGRAM:
 - 0
 SAMPLING:
@@ -50,7 +49,7 @@ NUM_BEAMS:
 MAX_SEQ_LEN:
 - 256
 FL:
-- true
+- false
 ADAPTIVE_BATCH_SIZE:
 - false
 TOTAL_BATCH_SIZE:
@@ -63,3 +62,11 @@ FL_LR:
 - 0.1
 FL_NITERS:
 - 5
+AUX_ADAM:
+- false
+FL_BETA_1:
+- 0
+DROP_THRESHOLD:
+- -1
+ENABLE_FL_EVERY:
+- -1

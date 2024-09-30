@@ -4,18 +4,28 @@ import wandb
 
 
 class WanDBWriter:
-    def __init__(self, config):
+    def __init__(self, accelerator, config):
         self.writer = None
 
-        wandb.login()
+        if accelerator:
+            self.logger = accelerator
+            accelerator.init_trackers(
+                project_name=config.project_name, 
+                config=config,
+                init_kwargs={"wandb": {"name": config.exp_name, 'dir': config.wandb_log_dir}},
+            )
+        else:
+            self.logger = wandb
 
-        wandb.init(
-            name=config.exp_name,
-            project=config.project_name,
-            config=config,
-            dir=config.wandb_log_dir,
-        )
-        self.wandb = wandb
+            wandb.login()
+
+            wandb.init(
+                name=config.exp_name,
+                project=config.project_name,
+                config=config,
+                dir=config.wandb_log_dir,
+            )
+
 
         self.step = 0
         self.mode = ""
@@ -38,18 +48,18 @@ class WanDBWriter:
         return f"{self.mode}-{scalar_name}"
 
     def add_scalar(self, scalar_name, scalar):
-        self.wandb.log(
+        self.logger.log(
             {
                 self.scalar_name(scalar_name): scalar,
             },
             step=self.step,
         )
     def add_dict(self, scalar_dict):
-        self.wandb.log(
+        self.logger.log(
             scalar_dict, step=self.step
         )
     def add_scalars(self, tag, scalars):
-        self.wandb.log(
+        self.logger.log(
             {
                 **{
                     f"{scalar_name}_{tag}_{self.mode}": scalar
@@ -60,13 +70,13 @@ class WanDBWriter:
         )
 
     def add_image(self, scalar_name, image):
-        self.wandb.log(
+        self.logger.log(
             {self.scalar_name(scalar_name): self.wandb.Image(image)}, step=self.step
         )
 
     def add_audio(self, scalar_name, audio, sample_rate=None):
         audio = audio.detach().cpu().numpy().T
-        self.wandb.log(
+        self.logger.log(
             {
                 self.scalar_name(scalar_name): self.wandb.Audio(
                     audio, sample_rate=sample_rate
@@ -76,7 +86,7 @@ class WanDBWriter:
         )
 
     def add_text(self, scalar_name, text):
-        self.wandb.log(
+        self.logger.log(
             {self.scalar_name(scalar_name): self.wandb.Html(text)}, step=self.step
         )
 

@@ -1,6 +1,8 @@
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 import numpy as np
 import os
+from copy import deepcopy
 from torch import nn
 import torch.nn.functional as F
 import torch
@@ -14,28 +16,8 @@ import pandas as pd
 import multiprocessing
 import time
 from typing import Tuple, List
+from accelerate.utils import gather_object
 
-
-class EmptyCacheTimeoutError(Exception):
-    pass
-
-
-def empty_cache_with_timeout(timeout):
-    def empty_cache():
-        torch.cuda.empty_cache()
-
-    process = multiprocessing.Process(target=empty_cache)
-
-    try:
-        process.start()
-        process.join(timeout)
-    except multiprocessing.TimeoutError:
-        process.terminate()
-        raise EmptyCacheTimeoutError(
-            "torch.cuda.empty_cache() took too long to execute."
-        )
-    else:
-        process.terminate()
 
 def dict_to_device(d, device='cuda'):
     out = {}
@@ -62,44 +44,76 @@ def train_epoch_base(
     scheduler,
     train_loader,
     val_batch,
-    crit,
     logger,
+    accelerator,
     config,
     epoch,
 ):
 
     model.train()
-    pbar = tqdm(enumerate(train_loader), total=len(train_loader))
+    pbar = tqdm(enumerate(train_loader), total=len(train_loader), disable=not accelerator.is_local_main_process)
     for batch_idx, batch in pbar:
+        st = logger.get_step()
+        logger.set_step(step=st+1, mode="train")
 
-        st = logger.get_step() + 1
-        logger.set_step(step=st, mode="train")
-
-        model_input = dict_to_device(batch['model_input'])
+        model_input = dict_to_device(batch['model_input'], device=config.device)
+        model_input.pop('src')
+        model_input.pop('src_att_mask')
         output = model.forward(**model_input)
-
         optimizer.zero_grad()
         loss = output["loss"]
 
-        if loss.dim() != 0:
-            loss = loss.mean()
-        loss.backward()
+        #loss.backward()
+        accelerator.backward(loss)
         optimizer.step()
         scheduler.step()
 
-        logger.add_scalar("loss", loss.item())
-        pbar.set_postfix({"Loss": loss.item()})
+        if accelerator.sync_gradients:
+            logger.add_scalar("loss", loss)
 
         if (st % config.save_every == 0) and (config.save_strategy == 'steps'):
-            save_model(model, tokenizer, config, iteration=st)
+            save_model(model, tokenizer, config, iteration=st, accelerator=accelerator)
 
         if st >= config.max_steps:
             break
 
 
-    return None
-    # return loss ...
+def prepare_fl_loaders(train_loaders, optimizer, epoch, config):
 
+    if config.drop_threshold > 0:
+        weights = optimizer.optimizer.weights
+        train_loader_iterator = {w_id: iter(loader) for w_id, loader in train_loaders.items() if weights[w_id] > config.drop_threshold}
+        optimizer.optimizer.drop_weights()
+        nsteps = min([len(loader) for w_id, loader in train_loaders.items() if weights[w_id] > config.drop_threshold])
+    else:
+        if config.enable_fl_every > 0:
+            if (epoch % config.enable_fl_every == 0):
+                print('enabled fl')
+                optimizer.optimizer.enabled_fl = True
+                train_loader_iterator = {w_id: iter(loader) for w_id, loader in train_loaders.items()}
+                optimizer.optimizer.active_weight_ids = torch.ones_like(optimizer.optimizer.active_weight_ids)
+                if epoch > 0:
+                    optimizer.optimizer.weights = deepcopy(optimizer.optimizer.prev_weights)
+                nsteps = min([len(loader) for w_id, loader in train_loaders.items()])
+            else:
+                optimizer.optimizer.enabled_fl = False
+                weights = optimizer.optimizer.weights
+                argmax_weight = torch.argmax(weights)
+                train_loader_iterator = {w_id: iter(loader) for w_id, loader in train_loaders.items() if w_id == argmax_weight}
+                optimizer.optimizer.active_weight_ids = torch.zeros_like(optimizer.optimizer.active_weight_ids)
+                optimizer.optimizer.active_weight_ids[argmax_weight] = True
+
+                #### WE ALSO NEED TO MAKE WEIGHT OF ACTIVE WEIGHT TO 1 !!!
+                optimizer.optimizer.prev_weights = deepcopy(weights)
+                optimizer.optimizer.weights = torch.zeros_like(weights)
+                optimizer.optimizer.weights[argmax_weight] = 1
+
+                nsteps = min([len(loader) for w_id, loader in train_loaders.items() if w_id == argmax_weight])
+        else:
+            train_loader_iterator = {w_id: iter(loader) for w_id, loader in train_loaders.items()}
+            nsteps = min([len(loader) for w_id, loader in train_loaders.items()])
+
+    return train_loader_iterator, nsteps
 
 def train_epoch_fl(
     model,
@@ -108,131 +122,136 @@ def train_epoch_fl(
     scheduler,
     train_loaders,
     val_loader,
-    crit,
     logger,
+    accelerator,
     config,
     epoch,
 ):
 
     model.train()
-    train_loader_iterator = [iter(loader) for loader in train_loaders]
-    ### how to deal with imbalanceness ###
-    nsteps = min([len(i) for i in train_loaders])
+    train_loader_iterator, nsteps = prepare_fl_loaders(train_loaders, optimizer, epoch, config)
 
-    pbar = tqdm(range(nsteps), total=nsteps)
+    pbar = tqdm(range(nsteps), total=nsteps, disable=not accelerator.is_local_main_process)
     for i in pbar:
-        overloader_loss = 0
-
+        overloader_loss = torch.tensor(0., device=accelerator.device)
+        
         st = logger.get_step() + 1
         logger.set_step(step=st, mode="train")
+        for i, (w_id,  iteraror) in enumerate(train_loader_iterator.items()):
+            batch = next(iteraror)
 
-        for w_id,  iteraror in enumerate(train_loader_iterator):
-            accum_iter = config.acc_steps[w_id]
-            accum_loss = 0
-            for step in range(accum_iter):
-                batch = next(iteraror)
-                model_input = dict_to_device(batch['model_input'])
-                output = model.forward(**model_input)
+            model_input = dict_to_device(batch['model_input'], device=accelerator.device)
+            model_input.pop('src')
+            model_input.pop('src_att_mask')
+            output = model.forward(**model_input)
+            loss = output["loss"]
 
-                loss = output["loss"]
-                if loss.dim() != 0:
-                    loss = loss.mean()
-                # normalize loss to account for batch accumulation
-                loss = loss / accum_iter
-                loss.backward()
-                accum_loss += loss.item()
+            accelerator.backward(loss)
+            overloader_loss += loss.item()
 
-            overloader_loss += accum_loss
+            # sync grad before registering into optimizer
+            if accelerator.sync_gradients:
+                optimizer.optimizer.register_worker_grad(w_id)
+            if i < len(train_loader_iterator) - 1: 
+                optimizer.zero_grad()  
 
-            optimizer.step(w_id, model, crit, val_loader)
-            optimizer.zero_grad()  
-          
+        optimizer.step()
+        optimizer.zero_grad()
         scheduler.step()
-        overloader_loss = overloader_loss / len(train_loader_iterator)
-        logger.add_scalar("loss", overloader_loss)
-        pbar.set_postfix({"Loss": overloader_loss})
+        if accelerator.sync_gradients:
+            overloader_loss = accelerator.reduce(overloader_loss, reduction='mean')
+            overloader_loss = overloader_loss / len(train_loader_iterator)
+            logger.add_scalar("loss", overloader_loss)
 
-        weights = optimizer.metrics()
+
+        weights = optimizer.optimizer.metrics()
         logger.add_dict(weights)
         if (st % config.save_every == 0) and (config.save_strategy == 'steps'):
-            save_model(model, tokenizer, config, iteration=st)
+            save_model(model, tokenizer, config, iteration=st, accelerator=accelerator)
 
         if st >= config.max_steps:
             break
-    
-
-    return None
 
 
 @torch.inference_mode()
-def validate(model, val_loader, logger, config):
+def validate(model, val_loader, logger, accelerator, config):
     model.eval()
 
     mean_loss = 0
-    for batch_idx, batch in tqdm(enumerate(val_loader)):
+    for batch_idx, batch in tqdm(enumerate(val_loader), desc="eval going", disable=not accelerator.is_local_main_process):
 
         with torch.no_grad():
-            model_input = dict_to_device(batch['model_input'])
+            model_input = dict_to_device(batch['model_input'], device=config.device)
+            model_input.pop('src')
+            model_input.pop('src_att_mask')
             output = model.forward(**model_input)
             loss = output["loss"]
-            if loss.dim() != 0:
-                loss = loss.mean()
-            mean_loss += loss.item()
+
+            if accelerator.sync_gradients:
+                mean_loss += loss.item()
     
 
     mean_loss = mean_loss / (batch_idx + 1)
     logger.add_scalar("Val_loss", mean_loss)
 
-
     return mean_loss
 
 @torch.inference_mode()
-def predict(model, tokenizer, val_loader, config, epoch=""):
+def predict(model, tokenizer, val_loader, config, accelerator, epoch=""):
     model.eval()
 
     all_preds = []
     all_labels = []
 
-    saving_path = (
-        config.saving_predictions_path + "_" + config.exp_name + "_" + str(epoch)
-    )
+    #output_batches = []
+    for lang_loader in val_loader:
+        evalbar = tqdm(enumerate(lang_loader), total=len(lang_loader), desc="prediction going", disable=not accelerator.is_local_main_process)
+        for batch_idx, batch in evalbar:
+            
+            if config.model_type == 'M2M100':
+                target_lang = batch['info'][0]['elem_target_lang']
+                config.gen_args['forced_bos_token_id'] = tokenizer.get_lang_id(target_lang)
 
-    evalbar = tqdm(enumerate(val_loader), total=len(val_loader), desc="eval going")
-    for batch_idx, batch in evalbar:
+            pred, gold = get_one_sample(model, tokenizer, batch, config, accelerator=accelerator)
+            predictions = gather_object(pred)
+            references = gather_object(gold)
 
-        pred, gold = get_one_sample(model, tokenizer, batch, config)
-
-        all_preds.extend(pred)
-        all_labels.extend(gold)
+            all_preds.extend(predictions)
+            all_labels.extend(references)
 
     return all_preds, all_labels
 
 
 @torch.inference_mode()
-def get_one_sample(model, tokenizer, batch, config) -> Tuple[List[str], List[str]]:
+def get_one_sample(model, tokenizer, batch, config, accelerator) -> Tuple[List[str], List[str]]:
     model.eval()
-    
-    if isinstance(model, torch.nn.DataParallel):
-        generated_tokens = model.module.generate(
-            inputs=batch['model_input']['input_ids'].to('cuda'),
-            attention_mask=batch['model_input']['attention_mask'].to('cuda'),
-            pad_token_id=tokenizer.eos_token_id,
+    print(model) 
+    if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+        generated_tokens = accelerator.unwrap_model(model).generate(
+            inputs=batch['model_input']['src'].to(config.device),
+            attention_mask=batch['model_input']['src_att_mask'].to(config.device),
+            pad_token_id=tokenizer.pad_token_id,
             **config.gen_args,
         )
     else:
         generated_tokens = model.generate(
-            inputs=batch['model_input']['input_ids'].to('cuda'),
-            attention_mask=batch['model_input']['attention_mask'].to('cuda'),
-            pad_token_id=tokenizer.eos_token_id,
+            inputs=batch['src']['input_ids'].to(config.device),
+            attention_mask=batch['model_input']['src_att_mask'].to(config.device),
+            pad_token_id=tokenizer.pad_token_id,
             **config.gen_args,
         )
-    decoded = tokenizer.batch_decode(generated_tokens.cpu(), skip_special_tokens=True)
+
+    if config.model_type == 'AutoLM':
+        src_len = batch['model_input']['src'].size(1)
+        generated_tokens = generated_tokens[:,src_len:]
+
+    decoded = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
     refs = [elem['output'] for elem in batch['info']]
 
     return decoded, refs
 
 
-def save_model(model, tokenizer, config, epoch=None, iteration=None):
+def save_model(model, tokenizer, config, epoch=None, iteration=None, accelerator=None):
     if not os.path.exists(config.saving_path):
         os.makedirs(config.saving_path)
 
@@ -243,10 +262,19 @@ def save_model(model, tokenizer, config, epoch=None, iteration=None):
     else:
         raise ValueError('no iter or epoch on save')
 
-    if isinstance(model, torch.nn.DataParallel):
-        model.module.save_pretrained(ckpt_name)
+    if accelerator:
+        unwrapped_model = accelerator.unwrap_model(model)
+        unwrapped_model.save_pretrained(
+            ckpt_name,
+            is_main_process=accelerator.is_main_process,
+            save_function=accelerator.save,
+        )
     else:
-        model.save_pretrained(ckpt_name)
+        if isinstance(model, torch.nn.DataParallel):
+            model.module.save_pretrained(ckpt_name)
+        else:
+            model.save_pretrained(ckpt_name)
 
     tokenizer.save_pretrained(ckpt_name)
-    print(f"saved")
+    if accelerator.is_main_process:
+        print("saved")

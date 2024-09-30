@@ -5,26 +5,38 @@ This repository contains code for paper [Low-Resource Machine Translation throug
 ## Using optimizer
 
 The optimizer could be found in ```pipeline_src/optimizers.py```. To add this into your code you just need to import the optimizer and correctly provide the losses to it during training. Below is the example of training with Indonesian and Javanese languages.
+Our code also requires accelerate to run.
 
 ```python
-from pipeline_src.optimizers import MeritFedA
+from pipeline_src.optimizers import MeritFedParallelMD
+from accelerate import Accelerator
+
+# Init the accelerator
+accelerator = Accelerator()
 
 config = {
   'lr': <learning rate of main optimizer>,
   'npeers': <number of datasets>,
   'mdlr_': <learning rate for auxiliary optimizer>,
-  'mdniters_' = <number of auxiliary optimizer iterations>
+  'mdniters_' = <number of auxiliary optimizer iterations>,
+  'drop_threshold' = <threshold to drop worker. Could be any value if not using>
 }
 device = <your device>
 
 model = <your HF model>
+# wrap the model with accelerator
+model = accelerator.prepare_model(model)
 weight_name_map = <mapping for dataset indexes and their names> # for example {0: indonesian, 1: javanese}
+train_loader, val_loader = <your dataloaders>
+# wrap dataloaders with accelerator
+train_loader = accelerator.prepare(train_loader)
+val_loader = accelerator.prepare(val_loader)
 
 optimizer = MeritFedA(
-  model.parameters(), config, device, weight_name_map
+  model.parameters(), config, val_loader=val_loader, model=model, accelerator=accelerator
 )
 
-# During training we need to pass the loss and the id of the dataset
+# During training we need to register each worker grad
 
 # First we calculate loss on the Indonesian Data
 w_id = 0 # We have set id 0 to indonesian
@@ -32,7 +44,9 @@ output = model.forward(indonesian_input)
 loss = output["loss"]
 loss.backward()
 # We step with providing id of data, model and validation loader to perform auxiliary optimization
-optimizer.step(w_id, model, val_loader)
+# double optimizer class since first is wrapper of accelerate
+optimizer.optimizer.register_worker_grad(w_id)
+# we perform the zero grad here
 optimizer.zero_grad()
 
 # Next we do the same with second language, javanese in our example
@@ -41,11 +55,13 @@ output = model.forward(javanese_input)
 loss = output["loss"]
 loss.backward()
 # We step the same way but with new id
-optimizer.step(w_id, model, val_loader)
-optimizer.zero_grad()
+optimizer.optimizer.register_worker_grad(w_id)
+# WE DO NOT PERFORM ZERO GRAD AT LAST WORKER!
 
-# The optimizer will do the overall model step only when all languages or data sources are provided
-# Unless it has seen all ids, it will not make optimization step
+# Finally we make a step once all gradients are registered
+optimizer.step()
+# Then we zero gradients only after the step performed
+optimizer.zero_grad()
 ```
 
 ## Paper reproducement
@@ -101,6 +117,10 @@ Personalized Federated Learning Parameters:
 - FL: parameter capable of turning off and on the Personalized Federated Learning
 - FL_LR: Learning rate for auxillary optimizer in FL setting, not used if FL disabled
 - FL_NITERS: Number of steps for auxillary optimizer in FL setting, not used if FL disabled
+- AUX_ADAM: Whether to perform auxiliary optimization with Adam and not Mirror Descent. Not recommended, since showed worse and unstable performance
+- FL_BETA_1: Beta_1 parameter for Auxiliary Adam optimizer.
+- DROP_THRESHOLD: Threshold to use for dropping worker, corresponding to MeritFed_Drop
+- ENABLE_FL_EVERY: On which epochs to perform MeritFed, corresponding to MeritFed_Cycle
 
 Adaptive Batch Parameters
 - ADAPTIVE_BATCH_SIZE: parameter capable of turning off and on the Adaptive Batch
